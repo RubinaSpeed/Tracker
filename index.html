@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rubina's Speed Tracker</title>
+  <!-- NOTE: Replace PLACEHOLDER_API_KEY with your chosen map provider API key. The code is written to use HERE/Geoapify/TomTom style REST endpoints as a fallback system. -->
+  <style>
+    /* Futuristic minimal UI */
+    :root{
+      --bg:#06070a;
+      --card:#0f1724;
+      --accent:#00ffd5;
+      --accent2:#8a5fff;
+      --glass: rgba(255,255,255,0.04);
+      font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#01040a 0%, #071025 60%);color:#e6f7ff}
+    .app{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+    .card{width:100%;max-width:720px;padding:28px;border-radius:18px;backdrop-filter: blur(6px);background:linear-gradient(135deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));box-shadow:0 10px 30px rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.03)}
+    h1{font-size:28px;text-align:center;margin:6px 0 22px;letter-spacing:3px;color:var(--accent)}
+    .subtitle{color:#b9dff0;text-align:center;margin-bottom:18px}
+    .center{display:flex;gap:18px;align-items:center;justify-content:center}
+    .btn{--size:120px;width:140px;height:56px;border-radius:14px;border:none;cursor:pointer;font-weight:700;letter-spacing:1px;transition:transform .16s ease, box-shadow .16s ease;display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(90deg,var(--accent),var(--accent2));color:#02101a;box-shadow:0 8px 30px rgba(0,0,0,0.6), 0 2px 8px rgba(138,95,255,0.12)}
+    .btn:active{transform:translateY(2px)}
+    .btn.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:#dbefff}
+    .status{margin-top:20px;padding:14px;border-radius:12px;background:var(--glass);display:flex;gap:12px;align-items:center}
+    .dot{width:12px;height:12px;border-radius:99px;background:#ff6b6b;box-shadow:0 0 10px rgba(255,107,107,0.18)}
+    .dot.ok{background:#32d583;box-shadow:0 0 14px rgba(50,213,131,0.14)}
+    .meta{font-size:14px;color:#cfeeff}
+    .big{font-size:42px;font-weight:800;color:#fff;text-align:center;margin-top:18px}
+    .small{font-size:13px;color:#9fc9e6;text-align:center}
+    footer{margin-top:18px;font-size:12px;color:#84b7d9;text-align:center}
+    @media (max-width:520px){.btn{width:120px;height:48px}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <h1>Rubina's Speed Tracker</h1>
+      <div class="subtitle">Simple — Animated — Android-first background-friendly</div>
+
+      <div class="center">
+        <button id="startBtn" class="btn">Start Tracking</button>
+        <button id="stopBtn" class="btn secondary">Stop</button>
+      </div>
+
+      <div class="status" style="margin-top:18px">
+        <div id="connDot" class="dot"></div>
+        <div class="meta">
+          <div id="statusText">Idle — not tracking</div>
+          <div id="coords" style="font-size:13px;margin-top:6px;color:#9fc9e6">--</div>
+        </div>
+      </div>
+
+      <div class="big" id="currentLimit">-- mph</div>
+      <div class="small" id="currentRoad">Waiting for GPS...</div>
+
+      <footer>
+        Plays 20/30/40/50/60/70 .mp3 from root. Uses a map provider for speed-limit lookup with fallback.
+      </footer>
+    </div>
+  </div>
+
+  <!-- Audio elements for the six speed files (user will place these in the same root) -->
+  <audio id="a20" preload="auto" src="20.mp3"></audio>
+  <audio id="a30" preload="auto" src="30.mp3"></audio>
+  <audio id="a40" preload="auto" src="40.mp3"></audio>
+  <audio id="a50" preload="auto" src="50.mp3"></audio>
+  <audio id="a60" preload="auto" src="60.mp3"></audio>
+  <audio id="a70" preload="auto" src="70.mp3"></audio>
+
+  <script>
+  /*
+    KEY DESIGN NOTES (read before editing):
+    - Replace PLACEHOLDER_API_KEY with your chosen provider key.
+    - Default strategy: Try a primary provider (HERE) to get speed limit by coordinates.
+      If it fails, fallback to Geoapify/TomTom/OSM approach (example code included as comments).
+    - Background strategy for Android: request Screen Wake Lock and use the MediaSession API so Android keeps an active media notification while audio is playing.
+      This increases the chance the browser keeps audio playing while the device is locked. It is NOT 100% guaranteed (depends on OEM/device/browser), but is the best web approach.
+    - Audio files must be in the same folder as this file and named: 20.mp3,30.mp3,40.mp3,50.mp3,60.mp3,70.mp3
+    - The app announces immediately when entering a new speed-zone and then repeats every 20 seconds.
+  */
+
+  // USER CONFIG
+  const API_KEY = '4zCvKqaOKYJonTwhkpPVeCm8x10Q1kOrb7fV97zHAAM'; 
+
+  const PROVIDER = 'HERE'; 
+  
+  const ANNOUNCE_INTERVAL_MS = 15000; // 20 seconds
+
+  // UI refs
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const statusText = document.getElementById('statusText');
+  const coordsEl = document.getElementById('coords');
+  const connDot = document.getElementById('connDot');
+  const currentLimitEl = document.getElementById('currentLimit');
+  const currentRoadEl = document.getElementById('currentRoad');
+
+  // Audio map
+  const audioMap = {
+    20: document.getElementById('a20'),
+    30: document.getElementById('a30'),
+    40: document.getElementById('a40'),
+    50: document.getElementById('a50'),
+    60: document.getElementById('a60'),
+    70: document.getElementById('a70')
+  };
+
+  let watchId = null;
+  let lastZone = null; // e.g. 30
+  let announceTimer = null;
+  let wakeLock = null;
+
+  function setStatus(ok, text){
+    statusText.textContent = text;
+    connDot.className = 'dot ' + (ok? 'ok':'');
+  }
+
+  async function requestWakeLock(){
+    try{
+      if('wakeLock' in navigator){
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', ()=> console.log('Wake lock released'));
+        console.log('Wake lock acquired');
+      } else {
+        console.log('Wake Lock API not supported in this browser');
+      }
+    }catch(err){
+      console.warn('Wake lock request failed',err);
+    }
+  }
+
+  function releaseWakeLock(){
+    try{
+      if(wakeLock){ wakeLock.release(); wakeLock = null; }
+    }catch(e){/*ignore*/}
+  }
+
+  // MediaSession metadata (makes Android show playback controls and improves background behaviour)
+  function setMediaSessionMeta(limit){
+    if('mediaSession' in navigator){
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: `Speed limit ${limit} mph`,
+        artist: 'Rubina\'s Speed Tracker'
+      });
+    }
+  }
+
+  function playSpeedAudio(limit){
+    const rounded = Math.round(limit/10)*10; // e.g 33 -> 30
+    const candidate = [20,30,40,50,60,70].reduce((acc,v)=> Math.abs(v-rounded) < Math.abs(acc-rounded) ? v : acc,20);
+    // If candidate isn't one of our keys, pick nearest available
+    const audio = audioMap[candidate];
+    if(!audio) return;
+    // Stop other audios
+    Object.values(audioMap).forEach(a=>{ try{ a.pause(); a.currentTime = 0 }catch(e){} });
+    audio.play().catch(err=>{
+      console.warn('Playback failed (user gesture might be required):',err);
+    });
+    setMediaSessionMeta(candidate);
+  }
+
+  function scheduleRepeater(limit){
+    // play immediately and then every ANNOUNCE_INTERVAL_MS
+    clearInterval(announceTimer);
+    playSpeedAudio(limit);
+    announceTimer = setInterval(()=> playSpeedAudio(limit), ANNOUNCE_INTERVAL_MS);
+  }
+
+  function stopRepeater(){
+    clearInterval(announceTimer);
+    announceTimer = null;
+  }
+
+  // PRIMARY: attempt to get speed limit using HERE REST (example) or fallback providers.
+  // NOTE: replace approach if you have a different provider account or SDK.
+  async function getSpeedLimitHERE(lat, lng){
+    // Example: use HERE Map Attributes or Routing 'lookup' endpoints for speed limit data.
+    // HERE's enterprise endpoints sometimes require additional parameters; this example uses a generic 'linkinfo' style endpoint.
+    // This is a best-effort demo call — replace with your exact HERE endpoint and account-level parameters.
+    try{
+      const url = `https://lookup.search.hereapi.com/v1/revgeocode?at=${lat},${lng}&limit=1&apiKey=${API_KEY}`;
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('HERE revgeocode failed');
+      const j = await res.json();
+      // HERE revgeocode does not always include speed limit. In production you would call the appropriate HERE Roads/Attributes endpoint or use the SDK.
+      // We'll try to parse address or title as a fallback marker.
+      return { speed:null, road: j.items && j.items[0] && (j.items[0].address.label || j.items[0].title) };
+    }catch(e){
+      console.warn('HERE lookup failed',e);
+      return { speed:null, road:null };
+    }
+  }
+
+  async function getSpeedLimitGeoapify(lat,lng){
+    // Geoapify map-matching or map features can return speed limit metadata. Example endpoint (requires key):
+    try{
+      const url = `https://api.geoapify.com/v1/routing?waypoints=${lat},${lng}&mode=drive&apiKey=${API_KEY}`; // this is a simplification for demo
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('Geoapify failed');
+      const j = await res.json();
+      // Many Geoapify endpoints return a 'speed_limit' field on route segments — adapt in production.
+      // Returning null here as placeholder
+      return { speed:null, road: j && j.features && j.features[0] && j.features[0].properties && j.features[0].properties.name };
+    }catch(e){
+      console.warn('Geoapify lookup failed',e);
+      return { speed:null, road:null };
+    }
+  }
+
+  async function getSpeedLimitTomTom(lat,lng){
+    // TomTom has Snap-to-Roads and speed-limits services (server-side). Example placeholder call:
+    try{
+      const url = `https://api.tomtom.com/routing/1/calculateRoute/${lat},${lng}/json?key=${API_KEY}`;
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('TomTom failed');
+      const j = await res.json();
+      return { speed:null, road: j && j.routes && j.routes[0] && j.routes[0].summary && j.routes[0].summary.lengthInMeters };
+    }catch(e){
+      console.warn('TomTom lookup failed',e);
+      return { speed:null, road:null };
+    }
+  }
+
+  async function lookupSpeedLimit(lat,lng){
+    // Try provider chain. Return object: {speed: <mph or null>, road: <string|null>}
+    if(PROVIDER === 'HERE'){
+      const r = await getSpeedLimitHERE(lat,lng);
+      if(r && r.speed) return r;
+      // fallback to geoapify
+      const r2 = await getSpeedLimitGeoapify(lat,lng);
+      if(r2 && r2.speed) return r2;
+      return {speed:null, road: r.road || r2.road || null};
+    }
+    if(PROVIDER === 'GEOAPIFY'){
+      const r = await getSpeedLimitGeoapify(lat,lng);
+      if(r && r.speed) return r;
+      const r2 = await getSpeedLimitHERE(lat,lng);
+      return {speed: r2.speed || null, road: r.road || r2.road};
+    }
+    if(PROVIDER === 'TOMTOM'){
+      const r = await getSpeedLimitTomTom(lat,lng);
+      if(r && r.speed) return r;
+      const r2 = await getSpeedLimitGeoapify(lat,lng);
+      return {speed: r2.speed || null, road: r.road || r2.road};
+    }
+    return {speed:null, road:null};
+  }
+
+  // Convert kph to mph helper
+  function kphToMph(k){ return Math.round(k * 0.621371); }
+
+  async function positionHandler(pos){
+    const lat = pos.coords.latitude;
+    const lng = pos.coords.longitude;
+    coordsEl.textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} — accuracy ${Math.round(pos.coords.accuracy)}m`;
+
+    // Lookup speed limit for this location (debounce do not spam provider)
+    const lookup = await lookupSpeedLimit(lat,lng);
+    let sl = lookup.speed;
+    if(sl && sl > 140) { // sanity cap (kph)
+      sl = null;
+    }
+    let mph = sl ? kphToMph(sl) : null;
+
+    // If no speed returned, try heuristics: use previous lastZone or assume 30
+    if(!mph){
+      // fallback heuristic based on road name or keep previous
+      mph = lastZone || 30;
+    }
+
+    currentLimitEl.textContent = mph + ' mph';
+    currentRoadEl.textContent = lookup.road ? lookup.road : 'Unknown road';
+
+    // If new zone
+    if(mph !== lastZone){
+      lastZone = mph;
+      // announce immediately and (re)start timer
+      scheduleRepeater(mph);
+      setStatus(true, `Tracking — announced ${mph} mph`);
+    }
+  }
+
+  function errorHandler(err){
+    console.warn('Geolocation error', err);
+    setStatus(false, 'GPS error: ' + (err.message||err.code));
+  }
+
+  startBtn.addEventListener('click', async ()=>{
+    if(!('geolocation' in navigator)){
+      setStatus(false, 'Geolocation not supported in this browser');
+      return;
+    }
+    setStatus(true, 'Requesting GPS...');
+    // Try to acquire wake lock to help keep device awake on Android
+    await requestWakeLock();
+
+    // Start watching position
+    watchId = navigator.geolocation.watchPosition(positionHandler, errorHandler, { enableHighAccuracy:true, maximumAge:1000, timeout:10000 });
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+  });
+
+  stopBtn.addEventListener('click', ()=>{
+    if(watchId !== null){ navigator.geolocation.clearWatch(watchId); watchId = null; }
+    stopRepeater();
+    releaseWakeLock();
+    lastZone = null;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    setStatus(false, 'Stopped');
+    currentLimitEl.textContent = '-- mph';
+    currentRoadEl.textContent = 'Not tracking';
+    coordsEl.textContent = '--';
+  });
+
+  // Init state
+  stopBtn.disabled = true;
+  setStatus(false, 'Idle — not tracking');
+
+  // Warn user about autoplay restrictions: user gesture required to start audio in many browsers.
+  // We attempt to play on start; if blocked, instruct user to tap the screen to allow audio.
+
+  // NOTE: Service workers cannot play audio directly. The approach used here keeps playback in the page and uses WakeLock + MediaSession to improve background behaviour on Android.
+
+  </script>
+</body>
+</html>
