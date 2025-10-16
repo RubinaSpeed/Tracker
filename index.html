@@ -37,7 +37,7 @@
   <div class="app">
     <div class="card">
       <h1>Rubina's Speed Tracker</h1>
-      <div class="subtitle">Simple — Animated — Android-first background-friendly</div>
+      <div class="subtitle">Simple interface - Be aware of the speed limit</div>
 
       <div class="center">
         <button id="startBtn" class="btn">Start Tracking</button>
@@ -56,7 +56,7 @@
       <div class="small" id="currentRoad">Waiting for GPS...</div>
 
       <footer>
-        Plays 20/30/40/50/60/70 .mp3 from root. Uses HERE API for speed-limit lookup.
+       Using HERE API for speed-limit and GPS lookup.
       </footer>
     </div>
   </div>
@@ -96,6 +96,8 @@ const audioMap = {
 
 let watchId = null;
 let lastZone = null;
+let lastRoad = null;      
+let lastAddress = null;
 let announceTimer = null;
 let wakeLock = null;
 let lastGoodPosition = null;
@@ -326,6 +328,7 @@ async function lookupSpeedLimit(lat,lng){
 }
 
 // Mobile-optimized position handler
+// Fixed position handler that always updates road names
 async function positionHandler(pos){
   const accuracy = pos.coords.accuracy;
   const lat = pos.coords.latitude;
@@ -346,9 +349,11 @@ async function positionHandler(pos){
 
   coordsEl.textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} — ${accuracyStatus} ${Math.round(accuracy)}m`;
 
-  // Process position even with poor accuracy on mobile
+  // ALWAYS lookup fresh data - don't cache based on speed limits
   const lookup = await lookupSpeedLimit(lat, lng);
+  console.log('Fresh lookup result:', lookup);
   
+  // ALWAYS update the display with new location data
   let displayText = 'Getting location...';
   if (lookup.address) {
     displayText = lookup.address;
@@ -358,14 +363,24 @@ async function positionHandler(pos){
   
   currentRoadEl.textContent = displayText;
   
-  let mph = lookup.speed || lastZone || 30;
+  let mph = lookup.speed || 30; // Always use current data, don't fallback to lastZone
+  
   currentLimitEl.textContent = mph + ' mph';
 
-  if (mph !== lastZone) {
+  // Check if we should announce (either speed changed OR location changed significantly)
+  const shouldAnnounce = mph !== lastZone || 
+                        (lookup.road && lookup.road !== lastRoad) ||
+                        (lookup.address && lookup.address !== lastAddress);
+
+  if (shouldAnnounce) {
     lastZone = mph;
     scheduleRepeater(mph);
     const locationDesc = lookup.road || lookup.address || 'current location';
     setStatus(true, `Tracking: ${mph} mph near ${locationDesc}`);
+    
+    // Store current location info for comparison
+    lastRoad = lookup.road;
+    lastAddress = lookup.address;
   }
 }
 
