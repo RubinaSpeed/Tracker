@@ -72,7 +72,6 @@
   <script>
 // USER CONFIG
 const API_KEY = '4zCvKqaOKYJonTwhkpPVeCm8x10Q1kOrb7fV97zHAAM'; 
-const PROVIDER = 'HERE'; 
 const ANNOUNCE_INTERVAL_MS = 15000; // 15 seconds
 const MIN_ACCURACY_METERS = 50; // Only use positions with accuracy better than 50m
 
@@ -168,7 +167,98 @@ function stopRepeater(){
   announceTimer = null;
 }
 
-// Enhanced HERE API that focuses on getting address data first
+// Smart speed limit detection based on road type and location
+// Smart speed limit detection with better residential detection
+function detectSpeedLimitFromAddress(roadName, address, lat, lng) {
+  // Convert to lowercase for easier matching
+  const roadLower = (roadName || '').toLowerCase();
+  const addressLower = (address || '').toLowerCase();
+  
+  console.log('Detecting speed limit for:', roadLower, addressLower);
+  
+  // RESIDENTIAL AREAS FIRST (most restrictive)
+  if (roadLower.includes('close') ||
+      roadLower.includes('crescent') ||
+      roadLower.includes('court') ||
+      roadLower.includes('place') ||
+      roadLower.includes('gardens') ||
+      roadLower.includes('avenue') && !roadLower.includes('main') ||
+      roadLower.includes('drive') && !roadLower.includes('main') ||
+      addressLower.includes('residential') ||
+      addressLower.includes('housing') ||
+      addressLower.includes('estate') ||
+      addressLower.includes('close') ||
+      addressLower.includes('crescent') ||
+      addressLower.includes('court')) {
+    console.log('Detected residential area: 20 mph');
+    return 20;
+  }
+  
+  // URBAN STREETS (default 30 mph in UK)
+  if (roadLower.includes('street') ||
+      roadLower.includes('road') ||
+      roadLower.includes('avenue') ||
+      roadLower.includes('drive') ||
+      roadLower.includes('lane') ||
+      roadLower.includes('way') ||
+      addressLower.includes('town') ||
+      addressLower.includes('city') ||
+      addressLower.includes('centre') ||
+      addressLower.includes('urban') ||
+      addressLower.includes('borough')) {
+    console.log('Detected urban street: 30 mph');
+    return 30;
+  }
+  
+  // MAIN ROADS (40 mph)
+  if (roadLower.includes('main road') ||
+      roadLower.includes('a-road') ||
+      roadLower.includes('a road') && !roadLower.includes('motorway') ||
+      roadLower.includes('ring road') ||
+      roadLower.includes('bypass')) {
+    console.log('Detected main road: 40 mph');
+    return 40;
+  }
+  
+  // COUNTRY ROADS (60 mph)
+  if (roadLower.includes('country') ||
+      roadLower.includes('rural') ||
+      roadLower.includes('lane') && addressLower.includes('country') ||
+      addressLower.includes('country') ||
+      addressLower.includes('village') && !addressLower.includes('town')) {
+    console.log('Detected country road: 60 mph');
+    return 60;
+  }
+  
+  // MOTORWAYS (70 mph) - only very specific cases
+  if ((roadLower.includes('motorway') || 
+      roadLower.startsWith('m') || // M1, M6, etc.
+      roadLower.includes('m1') ||
+      roadLower.includes('m6') ||
+      roadLower.includes('m25') ||
+      roadLower.includes('m62')) && 
+      !addressLower.includes('town') &&
+      !addressLower.includes('city') &&
+      !addressLower.includes('centre')) {
+    console.log('Detected motorway: 70 mph');
+    return 70;
+  }
+  
+  // DUAL CARRIAGEWAYS (70 mph) - specific cases
+  if (roadLower.includes('dual carriageway') &&
+      !addressLower.includes('town') &&
+      !addressLower.includes('city')) {
+    console.log('Detected dual carriageway: 70 mph');
+    return 70;
+  }
+  
+  // DEFAULT: Assume 30 mph for safety (UK default urban speed)
+  console.log('Default to urban speed: 30 mph');
+  return 30;
+}
+
+
+// Enhanced HERE API that gets address and estimates speed limit
 async function getSpeedLimitHERE(lat, lng) {
   try {
     // Use Reverse Geocoding to get address (this works with your API key)
@@ -207,32 +297,17 @@ async function getSpeedLimitHERE(lat, lng) {
             address = addr.street || addr.district || addr.city || 'Unknown location';
           }
         }
+        
+        // Estimate speed limit based on address and road type
+        speedLimit = detectSpeedLimitFromAddress(roadName, address, lat, lng);
+        console.log('Estimated speed limit:', speedLimit, 'mph based on road type');
       }
     } else {
       console.warn('Geocoding failed with status:', geocodeRes.status);
     }
     
-    // Try to get speed limit from Routing API as fallback
-    let routingSpeedLimit = null;
-    try {
-      const routingUrl = `https://route.ls.hereapi.com/routing/7.2/getlinkinfo.json?apiKey=${API_KEY}&waypoint=${lat},${lng}`;
-      const routingRes = await fetch(routingUrl);
-      
-      if (routingRes.ok) {
-        const routingData = await routingRes.json();
-        console.log('HERE Routing Response:', routingData);
-        
-        if (routingData.response && routingData.response.link && routingData.response.link.speedLimit) {
-          routingSpeedLimit = kphToMph(parseInt(routingData.response.link.speedLimit));
-          console.log('Found speed limit from Routing API:', routingSpeedLimit);
-        }
-      }
-    } catch (routingError) {
-      console.log('Routing API not available, using fallback speed limits');
-    }
-    
     return { 
-      speed: routingSpeedLimit, 
+      speed: speedLimit, 
       road: roadName,
       address: address 
     };
@@ -243,46 +318,10 @@ async function getSpeedLimitHERE(lat, lng) {
   }
 }
 
-// Fallback providers
-async function getSpeedLimitGeoapify(lat,lng){
-  try{
-    const url = `https://api.geoapify.com/v1/routing?waypoints=${lat},${lng}&mode=drive&apiKey=${API_KEY}`;
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('Geoapify failed');
-    const j = await res.json();
-    return { 
-      speed: null, 
-      road: j && j.features && j.features[0] && j.features[0].properties && j.features[0].properties.name,
-      address: null 
-    };
-  }catch(e){
-    console.warn('Geoapify lookup failed',e);
-    return { speed: null, road: null, address: null };
-  }
-}
-
 async function lookupSpeedLimit(lat,lng){
-  if(PROVIDER === 'HERE'){
-    const r = await getSpeedLimitHERE(lat,lng);
-    return {
-      speed: r.speed, 
-      road: r.road,
-      address: r.address
-    };
-  }
-  if(PROVIDER === 'GEOAPIFY'){
-    const r = await getSpeedLimitGeoapify(lat,lng);
-    return {
-      speed: r.speed, 
-      road: r.road,
-      address: r.address
-    };
-  }
-  return {speed: null, road: null, address: null};
+  const result = await getSpeedLimitHERE(lat,lng);
+  return result;
 }
-
-// Convert kph to mph helper
-function kphToMph(k){ return Math.round(k * 0.621371); }
 
 // Improved position handler with address display
 async function positionHandler(pos){
@@ -335,7 +374,7 @@ async function positionHandler(pos){
   
   let mph = lookup.speed;
   
-  // If no speed limit from API, use fallback logic
+  // If no speed limit detected, use fallback logic
   if (!mph) {
     mph = lastZone || 30; // Fallback to previous or default 30
   }
