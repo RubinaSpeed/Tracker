@@ -72,8 +72,8 @@
  <script>
 // USER CONFIG
 const API_KEY = '4zCvKqaOKYJonTwhkpPVeCm8x10Q1kOrb7fV97zHAAM'; 
-const ANNOUNCE_INTERVAL_MS = 15000; // 15 seconds
-const MIN_ACCURACY_METERS = 100; // Increased for mobile tolerance
+const ANNOUNCE_INTERVAL_MS = 20000; // Increased to 20 seconds to reduce spam
+const MIN_ACCURACY_METERS = 100;
 
 // UI refs
 const startBtn = document.getElementById('startBtn');
@@ -96,12 +96,16 @@ const audioMap = {
 
 let watchId = null;
 let lastZone = null;
-let lastRoad = null;      
+let lastRoad = null;
 let lastAddress = null;
 let announceTimer = null;
 let wakeLock = null;
-let lastGoodPosition = null;
 let isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+let positionCount = 0;
+let lastApiCallTime = 0;
+const API_CALL_INTERVAL = 5000; // Only call API every 5 seconds max
+
+console.log('=== APP INITIALIZED ===');
 
 function setStatus(ok, text){
   statusText.textContent = text;
@@ -109,16 +113,12 @@ function setStatus(ok, text){
 }
 
 async function requestWakeLock(){
-  if (!isMobile) return; // Only use wake lock on mobile
-  
+  if (!isMobile) return;
   try{
     if('wakeLock' in navigator){
       wakeLock = await navigator.wakeLock.request('screen');
-      console.log('Wake lock acquired for mobile');
     }
-  }catch(err){
-    console.warn('Wake lock request failed',err);
-  }
+  }catch(err){}
 }
 
 function releaseWakeLock(){
@@ -127,7 +127,6 @@ function releaseWakeLock(){
   }catch(e){}
 }
 
-// MediaSession for mobile background behavior
 function setMediaSessionMeta(limit){
   if('mediaSession' in navigator){
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -144,18 +143,11 @@ function playSpeedAudio(limit){
   const audio = audioMap[candidate];
   if(!audio) return;
   
-  // Stop other audios
   Object.values(audioMap).forEach(a=>{ 
-    try{ 
-      a.pause(); 
-      a.currentTime = 0;
-    } catch(e){} 
+    try{ a.pause(); a.currentTime = 0 } catch(e){} 
   });
   
-  // Mobile-specific audio handling
   audio.play().catch(err=>{
-    console.warn('Mobile playback failed:', err);
-    // On mobile, user might need to interact first
     if (isMobile) {
       setStatus(false, 'Tap screen to enable audio');
     }
@@ -166,7 +158,10 @@ function playSpeedAudio(limit){
 function scheduleRepeater(limit){
   clearInterval(announceTimer);
   playSpeedAudio(limit);
-  announceTimer = setInterval(()=> playSpeedAudio(limit), ANNOUNCE_INTERVAL_MS);
+  announceTimer = setInterval(()=> {
+    console.log('🔊 Scheduled announcement:', limit + ' mph');
+    playSpeedAudio(limit);
+  }, ANNOUNCE_INTERVAL_MS);
 }
 
 function stopRepeater(){
@@ -174,236 +169,223 @@ function stopRepeater(){
   announceTimer = null;
 }
 
-// Mobile-optimized geolocation with fallbacks
-function startMobileGeolocation() {
+function startGeolocation() {
   if (watchId !== null) {
     navigator.geolocation.clearWatch(watchId);
   }
 
-  // Mobile-optimized settings
   const options = {
     enableHighAccuracy: true,
-    maximumAge: isMobile ? 5000 : 0, // Longer cache for mobile
-    timeout: isMobile ? 45000 : 30000 // Longer timeout for mobile GPS
+    maximumAge: 10000, // 10 second cache
+    timeout: 15000
   };
-
-  console.log('Starting mobile geolocation with options:', options);
   
   watchId = navigator.geolocation.watchPosition(
     positionHandler, 
-    mobileErrorHandler, 
+    errorHandler, 
     options
   );
 }
 
-// Enhanced error handler for mobile
-function mobileErrorHandler(err){
-  console.warn('Mobile geolocation error', err);
-  let errorMsg = 'Mobile GPS: ';
-  
+function errorHandler(err){
+  let errorMsg = 'GPS: ';
   switch(err.code) {
     case err.PERMISSION_DENIED:
-      errorMsg += 'Permission denied. Enable location in browser settings.';
-      // Mobile-specific guidance
-      if (isMobile) {
-        errorMsg += ' (Check phone Settings > Site permissions)';
-      }
+      errorMsg += 'Permission denied';
       break;
     case err.POSITION_UNAVAILABLE:
-      errorMsg += 'Signal weak. Move to open area.';
-      if (isMobile) {
-        errorMsg += ' Ensure Location is set to "High Accuracy".';
-      }
+      errorMsg += 'Signal weak';
       break;
     case err.TIMEOUT:
-      errorMsg += 'GPS timeout. Phone may need 1-2 minutes to get satellite lock.';
+      errorMsg += 'Timeout';
       break;
     default:
-      errorMsg += err.message || 'Check location settings';
+      errorMsg += 'Check location';
   }
-  
   setStatus(false, errorMsg);
-  
-  // Mobile-specific recovery suggestion
-  if (isMobile) {
-    setTimeout(() => {
-      if (watchId) {
-        setStatus(false, 'Still trying... Move phone to window or outdoors');
-      }
-    }, 5000);
-  }
 }
 
-// Smart speed limit detection with better residential detection
-function detectSpeedLimitFromAddress(roadName, address, lat, lng) {
+function detectSpeedLimitFromAddress(roadName, address) {
   const roadLower = (roadName || '').toLowerCase();
   const addressLower = (address || '').toLowerCase();
   
-  // RESIDENTIAL AREAS FIRST
   if (roadLower.includes('close') ||
       roadLower.includes('crescent') ||
       roadLower.includes('court') ||
       roadLower.includes('place') ||
       roadLower.includes('gardens') ||
-      roadLower.includes('avenue') && !roadLower.includes('main') ||
-      roadLower.includes('drive') && !roadLower.includes('main') ||
       addressLower.includes('residential') ||
       addressLower.includes('housing') ||
-      addressLower.includes('estate') ||
-      addressLower.includes('close') ||
-      addressLower.includes('crescent') ||
-      addressLower.includes('court')) {
+      addressLower.includes('estate')) {
     return 20;
   }
   
-  // URBAN STREETS
   if (roadLower.includes('street') ||
       roadLower.includes('road') ||
       roadLower.includes('avenue') ||
       roadLower.includes('drive') ||
       roadLower.includes('lane') ||
-      roadLower.includes('way') ||
       addressLower.includes('town') ||
       addressLower.includes('city') ||
-      addressLower.includes('centre') ||
-      addressLower.includes('urban') ||
-      addressLower.includes('borough')) {
+      addressLower.includes('centre')) {
     return 30;
   }
   
-  // Default safe speed for mobile
+  if (roadLower.includes('main road') ||
+      roadLower.includes('a-road') ||
+      roadLower.includes('ring road') ||
+      roadLower.includes('bypass')) {
+    return 40;
+  }
+  
   return 30;
 }
 
-// Enhanced HERE API for mobile
 async function getSpeedLimitHERE(lat, lng) {
   try {
-    const geocodeUrl = `https://revgeocode.search.hereapi.com/v1/revgeocode?at=${lat},${lng}&apiKey=${API_KEY}`;
-    const geocodeRes = await fetch(geocodeUrl);
+    // Use HERE Routing API which actually has speed limit data
+    const url = `https://router.hereapi.com/v8/routes?transportMode=car&origin=${lat},${lng}&destination=${lat},${lng}&return=travelSummary&apiKey=${API_KEY}`;
+    
+    const res = await fetch(url);
+    const data = await res.json();
+    
+    console.log('HERE Routing Response:', data);
     
     let speedLimit = null;
     let roadName = null;
-    let address = null;
     
-    if (geocodeRes.ok) {
-      const geocodeData = await geocodeRes.json();
-      
-      if (geocodeData.items && geocodeData.items[0]) {
-        const location = geocodeData.items[0];
-        
-        if (location.address) {
-          const addr = location.address;
-          roadName = addr.street || addr.road || null;
-          
-          if (addr.street && addr.city) {
-            address = `${addr.street}, ${addr.city}`;
-          } else if (addr.street && addr.county) {
-            address = `${addr.street}, ${addr.county}`;
-          } else if (addr.label) {
-            address = addr.label.length > 50 ? addr.label.substring(0, 50) + '...' : addr.label;
-          } else {
-            address = addr.street || addr.district || addr.city || 'Getting location...';
-          }
-        }
-        
-        speedLimit = detectSpeedLimitFromAddress(roadName, address, lat, lng);
+    // Extract speed limit from routing data
+    if (data.routes && data.routes[0] && data.routes[0].sections) {
+      const section = data.routes[0].sections[0];
+      if (section.travelSummary && section.travelSummary.speedLimit) {
+        speedLimit = kphToMph(section.travelSummary.speedLimit);
       }
+      roadName = section.travelSummary?.streetName || null;
     }
     
-    return { 
-      speed: speedLimit, 
-      road: roadName,
-      address: address 
-    };
+    // Fallback to geocoding for address if no road from routing
+    let address = null;
+    if (!roadName) {
+      const geoData = await getAddressHERE(lat, lng);
+      roadName = geoData.road;
+      address = geoData.address;
+    }
+    
+    return { speed: speedLimit, road: roadName, address: address };
     
   } catch(e) {
-    console.warn('HERE lookup failed', e);
-    return { speed: null, road: null, address: null };
+    console.error('HERE Routing failed:', e);
+    // Fallback to geocoding only
+    return await getAddressHERE(lat, lng);
   }
 }
 
-async function lookupSpeedLimit(lat,lng){
-  const result = await getSpeedLimitHERE(lat,lng);
-  return result;
+async function getAddressHERE(lat, lng) {
+  // Your existing geocoding code for road names
+  const geocodeUrl = `https://revgeocode.search.hereapi.com/v1/revgeocode?at=${lat},${lng}&apiKey=${API_KEY}`;
+  const res = await fetch(geocodeUrl);
+  const data = await res.json();
+  
+  let roadName = null;
+  let address = null;
+  
+  if (data.items && data.items[0]) {
+    const addr = data.items[0].address;
+    roadName = addr.street || addr.road;
+    address = addr.label || `${addr.street}, ${addr.city}`;
+  }
+  
+  const speedLimit = detectSpeedLimitFromAddress(roadName, address);
+  return { speed: speedLimit, road: roadName, address: address };
 }
 
-// Mobile-optimized position handler
-// Fixed position handler that always updates road names
+
+async function lookupSpeedLimit(lat, lng) {
+  // Throttle API calls to avoid spam
+  const now = Date.now();
+  if (now - lastApiCallTime < API_CALL_INTERVAL) {
+    console.log('⏱️ Skipping API call - too soon');
+    return { speed: lastZone || 30, road: lastRoad, address: lastAddress };
+  }
+  
+  lastApiCallTime = now;
+  return await getSpeedLimitHERE(lat, lng);
+}
+
+// SIMPLE and RELIABLE position handler
 async function positionHandler(pos){
+  positionCount++;
+  
   const accuracy = pos.coords.accuracy;
   const lat = pos.coords.latitude;
   const lng = pos.coords.longitude;
 
-  // Mobile-specific accuracy handling
-  let accuracyStatus = '';
-  if (accuracy > 500) {
-    accuracyStatus = 'POOR ACCURACY';
-    setStatus(false, `Weak GPS: ${Math.round(accuracy)}m - Move outdoors`);
-  } else if (accuracy > 100) {
-    accuracyStatus = 'AVERAGE ACCURACY';
-    setStatus(true, `GPS OK: ${Math.round(accuracy)}m`);
-  } else {
-    accuracyStatus = 'GOOD ACCURACY';
-    setStatus(true, `Good GPS: ${Math.round(accuracy)}m`);
+  // Update coordinates display
+  let accuracyStatus = accuracy > 100 ? 'AVERAGE' : 'GOOD';
+  if (accuracy > 500) accuracyStatus = 'POOR';
+  
+  coordsEl.textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} — ${accuracyStatus} ACCURACY ${Math.round(accuracy)}m`;
+  setStatus(true, `Tracking - ${Math.round(accuracy)}m accuracy`);
+
+  // Only process if accuracy is reasonable
+  if (accuracy > 200) {
+    console.log('📍 Poor accuracy, skipping update');
+    return;
   }
 
-  coordsEl.textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} — ${accuracyStatus} ${Math.round(accuracy)}m`;
-
-  // ALWAYS lookup fresh data - don't cache based on speed limits
+  // Get location data
   const lookup = await lookupSpeedLimit(lat, lng);
-  console.log('Fresh lookup result:', lookup);
   
-  // ALWAYS update the display with new location data
-  let displayText = 'Getting location...';
+  // ALWAYS update the display
   if (lookup.address) {
-    displayText = lookup.address;
+    currentRoadEl.textContent = lookup.address;
   } else if (lookup.road) {
-    displayText = lookup.road;
+    currentRoadEl.textContent = lookup.road;
+  } else {
+    currentRoadEl.textContent = 'Getting location...';
   }
   
-  currentRoadEl.textContent = displayText;
-  
-  let mph = lookup.speed || 30; // Always use current data, don't fallback to lastZone
-  
+  const mph = lookup.speed || 30;
   currentLimitEl.textContent = mph + ' mph';
 
-  // Check if we should announce (either speed changed OR location changed significantly)
-  const shouldAnnounce = mph !== lastZone || 
-                        (lookup.road && lookup.road !== lastRoad) ||
-                        (lookup.address && lookup.address !== lastAddress);
-
-  if (shouldAnnounce) {
+  // Only change audio if speed limit actually changed
+  if (mph !== lastZone) {
     lastZone = mph;
     scheduleRepeater(mph);
-    const locationDesc = lookup.road || lookup.address || 'current location';
-    setStatus(true, `Tracking: ${mph} mph near ${locationDesc}`);
-    
-    // Store current location info for comparison
-    lastRoad = lookup.road;
-    lastAddress = lookup.address;
+    console.log('🚨 Speed limit changed to:', mph + ' mph');
   }
+
+  // Always update road info for display
+  lastRoad = lookup.road;
+  lastAddress = lookup.address;
 }
 
-// Mobile-specific start function
+// Event listeners
 startBtn.addEventListener('click', async ()=>{
+  console.log('🚀 Starting tracking...');
+  
+  // Reset state
+  lastZone = null;
+  lastRoad = null;
+  lastAddress = null;
+  positionCount = 0;
+  lastApiCallTime = 0;
+  
   if(!('geolocation' in navigator)){
     setStatus(false, 'Geolocation not supported');
     return;
   }
   
-  // Mobile permission guidance
-  if (isMobile) {
-    setStatus(true, 'Allow location access when prompted...');
-  }
-  
+  setStatus(true, 'Starting GPS...');
   await requestWakeLock();
-  startMobileGeolocation();
+  startGeolocation();
   
   startBtn.disabled = true;
   stopBtn.disabled = false;
 });
 
 stopBtn.addEventListener('click', ()=>{
+  console.log('🛑 Stopping tracking');
   if(watchId !== null){ 
     navigator.geolocation.clearWatch(watchId); 
     watchId = null; 
@@ -411,7 +393,8 @@ stopBtn.addEventListener('click', ()=>{
   stopRepeater();
   releaseWakeLock();
   lastZone = null;
-  lastGoodPosition = null;
+  lastRoad = null;
+  lastAddress = null;
   startBtn.disabled = false;
   stopBtn.disabled = true;
   setStatus(false, 'Stopped');
@@ -420,23 +403,9 @@ stopBtn.addEventListener('click', ()=>{
   coordsEl.textContent = '--';
 });
 
-// Mobile initialization
-if (isMobile) {
-  console.log('Mobile browser detected - optimizing for phone');
-  // Add mobile-specific UI hints
-  document.addEventListener('click', function() {
-    // This helps with audio autoplay on mobile
-    Object.values(audioMap).forEach(audio => {
-      audio.play().then(() => audio.pause()).catch(() => {});
-    });
-  }, { once: true });
-}
-
 // Init state
 stopBtn.disabled = true;
 setStatus(false, 'Idle — tap Start Tracking');
-
-console.log('Mobile-optimized app loaded');
 </script>
 </body>
 </html>
